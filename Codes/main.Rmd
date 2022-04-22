@@ -1,0 +1,183 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(sp)
+library(gstat)
+library(sperrorest)
+library(mlr)
+library(ranger)
+library(ggplot2)
+```
+
+## boston data
+
+```{r}
+library(spData)
+boston_df<-boston.c
+coordinates(boston_df)<-c("LON","LAT")
+spplot(boston_df, "CMEDV", colorkey = TRUE,xlab="X coordinate", ylab="Y coordinate")
+
+ggplot(data=boston.c,aes(x=LON,y=LAT)) + geom_point(aes(col=CMEDV))+scale_fill_hc() +theme_pubr()
+
+library(sp)
+library(gstat)
+variogram_2=variogram(log(CMEDV)~ 1, data=boston_df)
+
+plot(variogram_2)
+
+```
+
+### Normal RF
+
+```{r}
+dist_mat_boston<-dist(boston.c[,c(4,5)])
+
+regr.task = makeRegrTask(data = boston.c, target = "CMEDV",coordinates = boston.c[,c(4,5)])
+
+discrete_ps = makeParamSet(
+  makeDiscreteParam("mtry", values=3:15),
+  makeDiscreteParam("min.node.size", values = 1:10)
+)
+ctrl = makeTuneControlGrid()
+rdesc = makeResampleDesc("SpCV", iters = 3L)
+res_1 = tuneParams("regr.ranger", task = regr.task, resampling = rdesc,
+  par.set = discrete_ps, control = ctrl)
+
+regr.lrn = makeLearner("regr.ranger", par.vals = list(num.trees = 1000,mtry=10,min.node.size=5))
+
+resampling = makeResampleDesc("SpRepCV", fold = 5,reps=100)
+set.seed(13)
+out_1_boston = resample(learner = regr.lrn, task = regr.task,
+  resampling = resampling)
+
+rmse_1_boston<-sapply(seq(from=1,to=250,by=5), function(x) sqrt(mean(out_1_boston$measures.test[x:(x+4),2])))
+```
+
+### RF-DIST
+
+```{r}
+pc<-prcomp(data.frame(as.matrix(dist_mat_boston)),scale = TRUE,center = TRUE)
+
+my_pca.var <- pc$sdev ^ 2
+ 
+# Proportion of variance for a scree plot
+propve <- my_pca.var / sum(my_pca.var)
+
+ 
+# Plot variance explained for each principal component
+plot(propve, xlab = "principal component",
+            ylab = "Proportion of Variance Explained",
+            ylim = c(0, 1), type = "b",
+            main = "Scree Plot")
+
+ggplot(data.frame(propve,PC=1:152),aes(y=propve,x=PC))+geom_point(size=2) +theme_pubr() + scale_x_discrete(name="Principal Component") + scale_y_continuous(name = "Proportion of variance explained") 
+
+new_data_boston<-cbind(boston.c[,-c(4,5)],data.frame(pc$x[,c(1:5)]))
+
+regr.task = makeRegrTask(data = new_data_boston, target = "CMEDV",coordinates = boston.c[,c(4,5)])
+
+discrete_ps = makeParamSet(
+  makeDiscreteParam("mtry", values=5:20),
+  makeDiscreteParam("min.node.size", values = 1:10)
+)
+ctrl = makeTuneControlRandom(maxit = 100L)
+rdesc = makeResampleDesc("SpCV", iters = 3L)
+res = tuneParams("regr.ranger", task = regr.task, resampling = rdesc,
+  par.set = discrete_ps, control = ctrl)
+
+regr.lrn = makeLearner("regr.ranger", par.vals = list(num.trees = 1000,mtry=20,min.node.size=6))
+
+resampling = makeResampleDesc("SpRepCV", fold = 5,reps=100)
+set.seed(12)
+out_2_boston = resample(learner = regr.lrn, task = regr.task,
+  resampling = resampling)
+
+rmse_2_boston<-sapply(seq(from=1,to=250,by=5), function(x) sqrt(mean(out_2_boston$measures.test[x:(x+4),2])))
+
+```
+
+### KNN
+
+```{r}
+regr.task = makeRegrTask(data = boston.c[,-1], target = "CMEDV",coordinates = boston.c[,c(3,4)])
+
+discrete_ps = makeParamSet(
+  makeDiscreteParam("k", values=2:25)
+)
+ctrl = makeTuneControlGrid()
+rdesc = makeResampleDesc("SpCV", iters = 3L)
+res = tuneParams("regr.kknn", task = regr.task, resampling = rdesc,
+  par.set = discrete_ps, control = ctrl)
+
+regr.lrn = makeLearner("regr.kknn",par.vals = list(k=7))
+
+resampling = makeResampleDesc("SpRepCV", fold = 5,reps=100)
+set.seed(13)
+out_3_boston = resample(learner = regr.lrn, task = regr.task,
+  resampling = resampling)
+
+rmse_3_boston<-sapply(seq(from=1,to=250,by=5), function(x) sqrt(mean(out_3_boston$measures.test[x:(x+4),2])))
+
+```
+
+### Kriging
+
+```{r}
+regr.task = makeRegrTask(data = boston.c[,-c(1,11)], target = "CMEDV",coordinates = boston.c[,c(4,5)])
+
+regr.lrn = makeLearner("regr.km")
+
+resampling = makeResampleDesc("SpRepCV", fold = 5,reps=50)
+set.seed(13)
+out_4_boston = resample(learner = regr.lrn, task = regr.task,
+  resampling = resampling)
+
+rmse_4_boston<-sapply(seq(from=1,to=250,by=5), function(x) sqrt(mean(out_4_boston$measures.test[x:(x+4),2])))
+
+```
+
+### BART
+
+```{r}
+library(BART)
+rmse_bart<-c()
+RMS <- function(num) sqrt(sum(num^2)/length(num))
+
+
+for(i in 51:250){
+  train_boston<-boston.c[-l$data[which(l$data$iter==i),1],]
+  test_boston<- boston.c[l$data[which(l$data$iter==i),1],]
+  post <- wbart(x.train=train_boston[,-6], y.train= train_boston[,6], ndpost=1000,x.test = test_boston[,-6])
+  rmse_bart[i]<-RMS(post$yhat.test.mean-test_boston[,6])
+}
+  
+rmse_bart_dist<-c()
+  
+for(i in 51:250){
+  train_boston<-new_data_boston[-l$data[which(l$data$iter==i),1],]
+  test_boston<- new_data_boston[l$data[which(l$data$iter==i),1],]
+  post <- wbart(x.train=train_boston[,-5], y.train= train_boston[,5], ndpost=1000,x.test = test_boston[,-5])
+  rmse_bart_dist[i]<-RMS(post$yhat.test.mean-test_boston[,5])
+}  
+
+rmse_5_boston<-sapply(seq(from=1,to=250,by=5), function(x) (mean(rmse_bart[x:(x+4)])))
+rmse_6_boston<-sapply(seq(from=1,to=250,by=5), function(x) (mean(rmse_bart_dist[x:(x+4)])))
+
+```
+
+
+### Results
+```{r}
+rmse_boston<-c(rmse_1_boston,rmse_2_boston,rmse_3_boston,rmse_4_boston,rmse_5_boston,rmse_6_boston)
+rmse_df_boston=data.frame(rmse=rmse_boston)
+rmse_df_boston['Model']<-c(rep("RF",50),rep("RF-DIST",50),rep("KNN",50),rep("Simple Kriging",50),rep("BART",50),rep("BART-DIST",50))
+
+library(ggthemes)
+library(ggpubr)
+
+ggboxplot(rmse_df_boston, x = "Model", y = "rmse",palette = c("#00AFBB", "#E7B800", "#FC4E07","blue","red","green"),color="Model") 
+```
+
